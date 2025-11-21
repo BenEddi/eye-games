@@ -1,5 +1,24 @@
 <template>
   <div class="wrapper">
+    <!-- Stepper + countdown (visible during tests) -->
+    <div
+      v-if="phase !== 'idle' && phase !== 'done'"
+      class="stepper"
+    >
+      <div
+        v-for="s in steps"
+        :key="s.id"
+        :class="['step', { active: phase === s.id }]"
+      >
+        <span class="step-index">{{ s.index }}</span>
+        <span class="step-label">{{ s.label }}</span>
+      </div>
+
+      <div v-if="countdown > 0" class="countdown">
+        ⏱ {{ countdown }}s
+      </div>
+    </div>
+
     <!-- Fullscreen game canvas (video is under it, handled by WebGazer) -->
     <canvas
       ref="canvas"
@@ -22,25 +41,68 @@
     <!-- Results -->
     <div v-if="phase === 'done'" class="results">
       <h2>Results</h2>
-      <ul>
-        <li><b>Calibration:</b> {{ results.calibration ? "OK" : "Weak" }}</li>
-        <li><b>Fixation:</b> {{ results.fixation ? "OK" : "Fail" }}</li>
-        <li><b>Smooth Pursuit:</b> {{ results.pursuit ? "OK" : "Fail" }}</li>
-        <li><b>Saccades:</b> {{ results.saccade ? "OK" : "Fail" }}</li>
+
+      <div class="overall">
+        Overall score: <span>{{ overallScore }}%</span>
+      </div>
+
+      <ul class="results-list">
+        <li>
+          <div class="res-header">
+            <span>Calibration</span>
+            <span :class="results.calibration ? 'ok' : 'fail'">
+              {{ metrics.calibration.score }}% ·
+              {{ results.calibration ? 'OK' : 'Weak' }}
+            </span>
+          </div>
+          <p class="res-reason">{{ metrics.calibration.reason }}</p>
+        </li>
+        <li>
+          <div class="res-header">
+            <span>Fixation</span>
+            <span :class="results.fixation ? 'ok' : 'fail'">
+              {{ metrics.fixation.score }}% ·
+              {{ results.fixation ? 'OK' : 'Fail' }}
+            </span>
+          </div>
+          <p class="res-reason">{{ metrics.fixation.reason }}</p>
+        </li>
+        <li>
+          <div class="res-header">
+            <span>Smooth Pursuit</span>
+            <span :class="results.pursuit ? 'ok' : 'fail'">
+              {{ metrics.pursuit.score }}% ·
+              {{ results.pursuit ? 'OK' : 'Fail' }}
+            </span>
+          </div>
+          <p class="res-reason">{{ metrics.pursuit.reason }}</p>
+        </li>
+        <li>
+          <div class="res-header">
+            <span>Saccades</span>
+            <span :class="results.saccade ? 'ok' : 'fail'">
+              {{ metrics.saccade.score }}% ·
+              {{ results.saccade ? 'OK' : 'Fail' }}
+            </span>
+          </div>
+          <p class="res-reason">{{ metrics.saccade.reason }}</p>
+        </li>
       </ul>
+
       <button class="start" @click="reset">Replay 🔁</button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from "vue"
+import { ref, computed, onMounted, onUnmounted } from "vue"
 import { loadWebGazer } from "../lib/webgazer-loader"
 
 let wg = null
 
 const phase = ref("idle") // idle | calibration | fixation | pursuit | saccade | done
 const text = ref("")
+
 const results = ref({
   calibration: false,
   fixation: false,
@@ -48,12 +110,42 @@ const results = ref({
   saccade: false,
 })
 
+/** extra metrics for final report */
+const metrics = ref({
+  calibration: { score: 0, reason: "" },
+  fixation: { score: 0, reason: "" },
+  pursuit: { score: 0, reason: "" },
+  saccade: { score: 0, reason: "" },
+})
+
+/** countdown seconds for each phase */
+const countdown = ref(0)
+let countdownInterval = null
+
 const gazeX = ref(null)
 const gazeY = ref(null)
 
 const canvas = ref(null)
 let ctx = null
 let interval = null
+
+// stepper config
+const steps = [
+  { id: "calibration", label: "Calibration", index: 1 },
+  { id: "fixation", label: "Fixation", index: 2 },
+  { id: "pursuit", label: "Pursuit", index: 3 },
+  { id: "saccade", label: "Saccades", index: 4 },
+]
+
+const overallScore = computed(() => {
+  const m = metrics.value
+  const total =
+    m.calibration.score +
+    m.fixation.score +
+    m.pursuit.score +
+    m.saccade.score
+  return Math.round(total / 4)
+})
 
 // calibration points as fractions of screen (center + 4 corners-ish)
 const calibPoints = [
@@ -95,6 +187,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (interval) clearInterval(interval)
+  if (countdownInterval) clearInterval(countdownInterval)
   if (wg) wg.end()
   window.removeEventListener("resize", resizeCanvas)
 })
@@ -104,6 +197,20 @@ function resizeCanvas() {
   if (!cnv) return
   cnv.width = window.innerWidth
   cnv.height = window.innerHeight
+}
+
+/* -------------------- COUNTDOWN -------------------- */
+function startCountdown(seconds) {
+  if (countdownInterval) clearInterval(countdownInterval)
+  countdown.value = seconds
+  countdownInterval = setInterval(() => {
+    countdown.value -= 1
+    if (countdown.value <= 0) {
+      countdown.value = 0
+      clearInterval(countdownInterval)
+      countdownInterval = null
+    }
+  }, 1000)
 }
 
 /* -------------------- GENERAL DRAWING -------------------- */
@@ -131,8 +238,15 @@ function startTest() {
     pursuit: false,
     saccade: false,
   }
+  metrics.value = {
+    calibration: { score: 0, reason: "" },
+    fixation: { score: 0, reason: "" },
+    pursuit: { score: 0, reason: "" },
+    saccade: { score: 0, reason: "" },
+  }
   calibIndex = 0
   calibClicks = 0
+  countdown.value = 0
   runCalibrationStep()
 }
 
@@ -154,6 +268,12 @@ function handleCanvasClick(event) {
   if (phase.value === "calibration") {
     if (calibClicks >= 5) {
       results.value.calibration = true
+      metrics.value.calibration.score = Math.min(
+        100,
+        Math.round((calibClicks / 5) * 100)
+      )
+      metrics.value.calibration.reason =
+        "You completed the 5-point calibration by clicking the target each time."
       startFixation()
     } else {
       calibIndex = (calibIndex + 1) % calibPoints.length
@@ -172,6 +292,9 @@ function startFixation() {
   let stable = 0
   let total = 0
 
+  if (interval) clearInterval(interval)
+  startCountdown(4) // 4 seconds
+
   interval = setInterval(() => {
     if (gazeX.value != null && gazeY.value != null) {
       const dx = Math.abs(gazeX.value - canvas.value.width / 2)
@@ -183,8 +306,18 @@ function startFixation() {
 
   setTimeout(() => {
     clearInterval(interval)
+    interval = null
+
+    const ratio = total > 0 ? stable / total : 0
+    const pct = Math.round(ratio * 100)
+    metrics.value.fixation.score = pct
+    metrics.value.fixation.reason = ratio > 0.3
+      ? "Your gaze stayed close to the center most of the time."
+      : "Your gaze moved too far from the center during the test."
+
     // quite forgiving – just need ~30% of frames close
-    results.value.fixation = total > 0 && stable / total > 0.3
+    results.value.fixation = total > 0 && ratio > 0.3
+
     startPursuit()
   }, 4000)
 }
@@ -198,6 +331,9 @@ function startPursuit() {
   let t = 0
   let hits = 0
   let total = 0
+
+  if (interval) clearInterval(interval)
+  startCountdown(5) // ~5 seconds
 
   interval = setInterval(() => {
     t += 0.05
@@ -218,7 +354,17 @@ function startPursuit() {
 
   setTimeout(() => {
     clearInterval(interval)
-    results.value.pursuit = total > 0 && hits / total > 0.25
+    interval = null
+
+    const ratio = total > 0 ? hits / total : 0
+    const pct = Math.round(ratio * 100)
+
+    metrics.value.pursuit.score = pct
+    metrics.value.pursuit.reason = ratio > 0.25
+      ? "Your gaze followed the moving target smoothly."
+      : "Your gaze lost the moving target too often."
+
+    results.value.pursuit = total > 0 && ratio > 0.25
     startSaccade()
   }, 5500)
 }
@@ -232,6 +378,9 @@ function startSaccade() {
   let leftHits = 0
   let rightHits = 0
   let toggle = false
+
+  if (interval) clearInterval(interval)
+  startCountdown(4) // ~4 seconds
 
   interval = setInterval(() => {
     toggle = !toggle
@@ -253,17 +402,43 @@ function startSaccade() {
 
   setTimeout(() => {
     clearInterval(interval)
+    interval = null
+
+    const ratio =
+      (leftHits > 0 ? 0.5 : 0) + (rightHits > 0 ? 0.5 : 0)
+    const pct = Math.round(ratio * 100)
+
+    metrics.value.saccade.score = pct
+    if (leftHits >= 1 && rightHits >= 1) {
+      metrics.value.saccade.reason =
+        "You shifted your gaze quickly between left and right targets."
+    } else if (leftHits === 0 && rightHits === 0) {
+      metrics.value.saccade.reason =
+        "The system did not detect consistent left or right gaze shifts."
+    } else if (leftHits === 0) {
+      metrics.value.saccade.reason =
+        "Rightward shifts were detected, but not enough leftward shifts."
+    } else {
+      metrics.value.saccade.reason =
+        "Leftward shifts were detected, but not enough rightward shifts."
+    }
+
     // super forgiving: at least one hit left & right
     results.value.saccade = leftHits >= 1 && rightHits >= 1
     phase.value = "done"
     text.value = ""
     clearScreen()
+    countdown.value = 0
   }, 4500)
 }
 
 /* -------------------- RESET -------------------- */
 function reset() {
   if (interval) clearInterval(interval)
+  if (countdownInterval) clearInterval(countdownInterval)
+  interval = null
+  countdownInterval = null
+  countdown.value = 0
   phase.value = "idle"
   text.value = ""
   clearScreen()
@@ -286,10 +461,65 @@ function reset() {
   z-index: 2;
 }
 
+/* Stepper */
+.stepper {
+  position: absolute;
+  top: 4%;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 4;
+  color: #fff;
+  font-size: 0.9rem;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(0, 174, 255, 0.1);
+}
+
+.step-index {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid #00eaff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+}
+
+.step-label {
+  white-space: nowrap;
+  font-size: 0.8rem;
+  opacity: 0.9;
+}
+
+.step.active {
+  background: rgba(0, 174, 255, 0.2);
+  border-color: #00eaff;
+}
+
+.countdown {
+  margin-left: 10px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  font-size: 0.8rem;
+}
+
 /* UI */
 .prompt {
   position: absolute;
-  top: 10%;
+  top: 12%;
   width: 100%;
   text-align: center;
   font-size: 1.4rem;
@@ -323,15 +553,54 @@ function reset() {
   border-radius: 14px;
   color: #fff;
   font-size: 1rem;
-  width: 340px;
+  width: 360px;
   z-index: 3;
 }
+
 .results h2 {
   margin-top: 0;
   text-align: center;
 }
-.results ul {
-  padding-left: 18px;
+
+.overall {
+  text-align: center;
+  margin-bottom: 10px;
+}
+.overall span {
+  font-weight: 600;
+  color: #00eaff;
+}
+
+.results-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0 0 12px 0;
+}
+
+.results-list li {
+  margin-bottom: 8px;
+}
+
+.res-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.res-reason {
+  font-size: 0.85rem;
+  opacity: 0.9;
+  margin: 2px 0 0 0;
+}
+
+.ok {
+  color: #00ff9d;
+  font-weight: 600;
+}
+
+.fail {
+  color: #ff5b5b;
+  font-weight: 600;
 }
 
 /* ---- GLOBAL OVERRIDES FOR WEBAZER ----- */
